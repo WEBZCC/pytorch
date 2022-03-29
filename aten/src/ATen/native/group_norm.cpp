@@ -31,6 +31,29 @@ std::tuple<Tensor, Tensor, Tensor> native_group_norm(
   const Tensor& gamma = *gamma_maybe_owned;
   const Tensor& beta = c10::value_or_else(beta_opt, [] { return Tensor(); });
 
+  TORCH_CHECK(
+      C % group == 0,
+      "Expected number of channels in input to be divisible by ",
+      "num_groups, but got input of shape ",
+      X.sizes(),
+      " and "
+      "num_groups=",
+      group);
+  TORCH_CHECK(
+      !gamma.defined() || (gamma.dim() == 1 && gamma.numel() == C),
+      "Expected weight to be a vector of size equal to the number of ",
+      "channels in input, but got weight of shape ",
+      gamma.sizes(),
+      " and input of shape ",
+      X.sizes());
+  TORCH_CHECK(
+      !beta.defined() || (beta.dim() == 1 && beta.numel() == C),
+      "Expected bias to be a vector of size equal to the number of ",
+      "channels in input, but got bias of shape ",
+      beta.sizes(),
+      " and input of shape ",
+      X.sizes());
+
   auto memory_format = X.device().is_cpu() ?
       X.suggest_memory_format() : at::MemoryFormat::Contiguous;
 
