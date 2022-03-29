@@ -7,13 +7,12 @@ import os.path
 import types
 from contextlib import contextmanager
 from pathlib import Path
-from typing import cast, Any, BinaryIO, Callable, Dict, List, Optional, Union
+from typing import cast, Any, BinaryIO, Callable, Dict, List, Optional, Union, Type
 from weakref import WeakValueDictionary
 
 import torch
 from torch.serialization import _get_restore_location, _maybe_decode_ascii
 
-from ._directory_reader import DirectoryReader
 from ._importlib import (
     _calc___package__,
     _normalize_line_endings,
@@ -26,7 +25,8 @@ from ._package_unpickler import PackageUnpickler
 from .file_structure_representation import Directory, _create_directory_from_file_list
 from .glob_group import GlobPattern
 from .importer import Importer
-
+from ._zip_file import PackageZipFileReader
+from ._zip_file_torchscript import TorchScriptPackageZipFileReader
 
 class PackageImporter(Importer):
     """Importers allow you to load code written to packages by :class:`PackageExporter`.
@@ -51,34 +51,23 @@ class PackageImporter(Importer):
         self,
         file_or_buffer: Union[str, torch._C.PyTorchFileReader, Path, BinaryIO],
         module_allowed: Callable[[str], bool] = lambda module_name: True,
+        zip_file_reader_type: Type[PackageZipFileReader] = TorchScriptPackageZipFileReader
     ):
         """Open ``file_or_buffer`` for importing. This checks that the imported package only requires modules
         allowed by ``module_allowed``
-
         Args:
             file_or_buffer: a file-like object (has to implement :meth:`read`, :meth:`readline`, :meth:`tell`, and :meth:`seek`),
                 a string, or an ``os.PathLike`` object containing a filename.
             module_allowed (Callable[[str], bool], optional): A method to determine if a externally provided module
                 should be allowed. Can be used to ensure packages loaded do not depend on modules that the server
                 does not support. Defaults to allowing anything.
-
+            zip_file_reader_type: A subclass of PackageZipFileReader which would be used to instantiate the zip file reader
         Raises:
             ImportError: If the package will use a disallowed module.
         """
         self.zip_reader: Any
-        if isinstance(file_or_buffer, torch._C.PyTorchFileReader):
-            self.filename = "<pytorch_file_reader>"
-            self.zip_reader = file_or_buffer
-        elif isinstance(file_or_buffer, (Path, str)):
-            self.filename = str(file_or_buffer)
-            if not os.path.isdir(self.filename):
-                self.zip_reader = torch._C.PyTorchFileReader(self.filename)
-            else:
-                self.zip_reader = DirectoryReader(self.filename)
-        else:
-            self.filename = "<binary>"
-            self.zip_reader = torch._C.PyTorchFileReader(file_or_buffer)
-
+        # TODO: @sahanp delete type ignore
+        self.zip_reader = zip_file_reader_type(file_or_buffer)  # type: ignore
         self.root = _PackageNode(None)
         self.modules = {}
         self.extern_modules = self._read_extern()
@@ -193,7 +182,7 @@ class PackageImporter(Importer):
                 tensor = self.zip_reader.get_storage_from_record(
                     ".data/" + name, size, dtype
                 )
-                if isinstance(self.zip_reader, torch._C.PyTorchFileReader):
+                if not self.zip_reader.is_directory():
                     storage_context.add_storage(name, tensor)
                 storage = tensor.storage()
             loaded_storages[key] = restore_location(storage, location)
@@ -286,7 +275,7 @@ class PackageImporter(Importer):
             :class:`Directory`
         """
         return _create_directory_from_file_list(
-            self.filename, self.zip_reader.get_all_records(), include, exclude
+            self.zip_reader.get_filename(), self.zip_reader.get_all_records(), include, exclude
         )
 
     def python_version(self):
@@ -358,7 +347,7 @@ class PackageImporter(Importer):
         for atom in name.split("."):
             if not isinstance(cur, _PackageNode) or atom not in cur.children:
                 raise ModuleNotFoundError(
-                    f'No module named "{name}" in self-contained archive "{self.filename}"'
+                    f'No module named "{name}" in self-contained archive "{self.zip_reader.get_filename()}"'
                     f" and the module is also not in the list of allowed external modules: {self.extern_modules}",
                     name=name,
                 )
@@ -663,13 +652,11 @@ class _PackageResourceReader:
     def resource_path(self, resource):
         # The contract for resource_path is that it either returns a concrete
         # file system path or raises FileNotFoundError.
-        if isinstance(
-            self.importer.zip_reader, DirectoryReader
-        ) and self.importer.zip_reader.has_record(
+        if (self.importer.zip_reader.is_directory()) and self.importer.zip_reader.has_record(
             os.path.join(self.fullname, resource)
         ):
             return os.path.join(
-                self.importer.zip_reader.directory, self.fullname, resource
+                self.importer.zip_reader.get_filename(), self.fullname, resource
             )
         raise FileNotFoundError
 
